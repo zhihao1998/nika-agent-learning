@@ -1,0 +1,8 @@
+id: meta-harness
+class: meta_agent.runtime:MetaAgent
+providers: [openai, custom]
+subscription: true
+credential_family: openai
+sandbox:
+  base: shell
+  install: []

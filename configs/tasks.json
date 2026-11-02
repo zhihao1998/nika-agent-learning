@@ -1,0 +1,227 @@
+{
+  "search": [
+    {
+      "id": "dc_clos_healthy",
+      "family": "healthy",
+      "template": "healthy",
+      "case": {
+        "scenario": "dc_clos",
+        "problem": "healthy",
+        "topo_size": "s",
+        "inject": {},
+        "root_causes": [],
+        "traffic": {
+          "pattern": "uniform"
+        },
+        "candidate_option_id": "scenario=dc_clos__topo_size=s__traffic=uniform__problem=healthy"
+      },
+      "source": "benchmark/working/pool/dc_clos/healthy.yaml"
+    },
+    {
+      "id": "dc_clos_link_down",
+      "family": "link_down",
+      "template": "link_down",
+      "case": {
+        "scenario": "dc_clos",
+        "problem": "link_down",
+        "problems": [
+          "link_down"
+        ],
+        "topo_size": "s",
+        "inject": {
+          "host_name": "client_0",
+          "intf_name": "eth0"
+        },
+        "root_causes": [
+          {
+            "resource": {
+              "kind": "link",
+              "name": "client_0:eth0--super_spine_router_0:eth2"
+            },
+            "fault_type": "link_down"
+          }
+        ],
+        "candidate_option_id": "scenario=dc_clos__topo_size=s__problem=link_down__inject.host_name=client_0__inject.intf_name=eth0",
+        "traffic": {
+          "pattern": "uniform"
+        }
+      },
+      "source": "benchmark/working/pool/dc_clos/link_down.yaml"
+    }
+  ],
+  "selection": [
+    {
+      "id": "campus_lan_healthy",
+      "family": "healthy",
+      "template": "healthy",
+      "case": {
+        "scenario": "campus_lan",
+        "problem": "healthy",
+        "topo_size": "s",
+        "inject": {},
+        "root_causes": [],
+        "traffic": {
+          "pattern": "uniform"
+        },
+        "candidate_option_id": "scenario=campus_lan__topo_size=s__traffic=uniform__problem=healthy"
+      },
+      "source": "benchmark/working/pool/campus_lan/healthy.yaml"
+    },
+    {
+      "id": "campus_lan_dns_record_error",
+      "family": "dns_record_error",
+      "template": "dns_record_error",
+      "case": {
+        "scenario": "campus_lan",
+        "problem": "dns_record_error",
+        "problems": [
+          "dns_record_error"
+        ],
+        "topo_size": "s",
+        "inject": {
+          "host_name": "dns_server",
+          "target_domain": "local",
+          "target_website": "web99"
+        },
+        "root_causes": [
+          {
+            "resource": {
+              "kind": "node",
+              "node": "dns_server"
+            },
+            "fault_type": "dns_record_error"
+          }
+        ],
+        "candidate_option_id": "scenario=campus_lan__topo_size=s__problem=dns_record_error__inject.host_name=dns_server__inject.target_domain=local__inject.target_website=web99",
+        "traffic": {
+          "pattern": "uniform"
+        }
+      },
+      "source": "benchmark/working/pool/campus_lan/dns_record_error.yaml"
+    },
+    {
+      "id": "campus_lan_ospf_neighbor_missing",
+      "family": "ospf_neighbor_missing",
+      "template": "ospf_neighbor_missing",
+      "case": {
+        "scenario": "campus_lan",
+        "problem": "ospf_neighbor_missing",
+        "problems": [
+          "ospf_neighbor_missing"
+        ],
+        "topo_size": "s",
+        "inject": {
+          "host_name": "router_core_1"
+        },
+        "root_causes": [
+          {
+            "resource": {
+              "kind": "node",
+              "node": "router_core_1"
+            },
+            "fault_type": "ospf_neighbor_missing"
+          }
+        ],
+        "candidate_option_id": "scenario=campus_lan__topo_size=s__problem=ospf_neighbor_missing__inject.host_name=router_core_1",
+        "traffic": {
+          "pattern": "uniform"
+        }
+      },
+      "source": "benchmark/working/pool/campus_lan/ospf_neighbor_missing.yaml"
+    }
+  ],
+  "final": [
+    {
+      "id": "isp_abilene_healthy",
+      "family": "healthy",
+      "template": "healthy",
+      "case": {
+        "scenario": "isp_abilene",
+        "problem": "healthy",
+        "topo_size": "s",
+        "igp": "isis",
+        "bgp_mode": "none",
+        "rpki": false,
+        "backend": "kathara",
+        "device_profile": "frr",
+        "traffic": {
+          "pattern": "uniform"
+        },
+        "inject": {},
+        "root_causes": []
+      },
+      "source": ".deps/nika/benchmark/working/pool/isp_abilene/healthy.yaml"
+    },
+    {
+      "id": "isp_abilene_frr_service_down",
+      "family": "frr_service_down",
+      "template": "frr_service_down",
+      "case": {
+        "scenario": "isp_abilene",
+        "problem": "frr_service_down",
+        "topo_size": "s",
+        "igp": "isis",
+        "bgp_mode": "none",
+        "rpki": false,
+        "backend": "kathara",
+        "device_profile": "frr",
+        "inject": {
+          "host_name": "atlam5"
+        },
+        "root_causes": [
+          {
+            "resource": {
+              "kind": "node",
+              "node": "atlam5"
+            },
+            "fault_type": "frr_service_down"
+          }
+        ],
+        "traffic": {
+          "pattern": "uniform"
+        },
+        "problems": [
+          "frr_service_down"
+        ]
+      },
+      "source": ".deps/nika/benchmark/working/pool/isp_abilene/frr_service_down.yaml"
+    },
+    {
+      "id": "isp_abilene_mtu_mismatch",
+      "family": "mtu_mismatch",
+      "template": "mtu_mismatch",
+      "case": {
+        "scenario": "isp_abilene",
+        "problem": "mtu_mismatch",
+        "topo_size": "s",
+        "igp": "isis",
+        "bgp_mode": "none",
+        "rpki": false,
+        "backend": "kathara",
+        "device_profile": "frr",
+        "inject": {
+          "host_name": "atlam5",
+          "intf_name": "eth0",
+          "mtu": "500"
+        },
+        "root_causes": [
+          {
+            "resource": {
+              "kind": "interface",
+              "node": "atlam5",
+              "name": "eth0"
+            },
+            "fault_type": "mtu_mismatch"
+          }
+        ],
+        "traffic": {
+          "pattern": "uniform"
+        },
+        "problems": [
+          "mtu_mismatch"
+        ]
+      },
+      "source": ".deps/nika/benchmark/working/pool/isp_abilene/mtu_mismatch.yaml"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/stanford-iris-lab/meta-harness",
+  "commit": "8123ccabe2b19fa1123090b2e5f1bacc20963ce8",
+  "files": {
+    "terminal_bench_2/meta_harness.py": "9b03eae7dfc8723c2aa06b24be5a0b85ede1c4f00c728ee80a2842488ccd10aa",
+    "terminal_bench_2/claude_wrapper.py": "5ff005d6c1d2f8500b643f71432a9649fc425503f7fee2183df858a95b33de3e"
+  }
+}

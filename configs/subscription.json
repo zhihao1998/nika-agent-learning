@@ -1,0 +1,23 @@
+{
+  "nika_commit": "SET_TO_REVIEWED_NIKA_COMMIT",
+  "model": "gpt-6-luna",
+  "base_url": "https://api.openai.com/v1",
+  "provider": "openai",
+  "model_api": "responses",
+  "serving_job_ids": [],
+  "execution_mode": "native",
+  "execution_options": {},
+  "state_dir": "/absolute/experiment/state/nika",
+  "agent_type": "meta-harness",
+  "max_steps": 20,
+  "max_tokens": 8192,
+  "temperature": 0.0,
+  "chat_template_kwargs": {},
+  "agent_timeout_sec": 1800,
+  "case_timeout_sec": 2400,
+  "total_timeout_sec": 28800,
+  "rounds": 2,
+  "optimizer_requests": 24,
+  "underlying_tool_calls": 60,
+  "max_attempts": 2
+}
