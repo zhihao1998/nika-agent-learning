@@ -10,6 +10,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -48,6 +49,11 @@ def check_source(source):
         isinstance(n, ast.AsyncFunctionDef) and n.name == "run" for n in cls.body
     ):
         raise ValueError("AgentHarness must define async run(task_description, ctx)")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level:
+            raise ValueError(
+                "Candidate is a standalone module; relative imports are unsupported"
+            )
     compile(tree, "candidate.py", "exec")
 
 
@@ -106,8 +112,27 @@ def stage(root, name, source, *, config=None):
     return candidate
 
 
-def create(root, config_path, tasks_path, admission_dir):
+def create(
+    root,
+    config_path,
+    tasks_path,
+    admission_dir,
+    *,
+    frozen_cohort=None,
+    baseline_source=None,
+):
     config, tasks = read(config_path), read(tasks_path)
+    if "frozen_cohort" in config:
+        raise ValueError("Use fork-validation to register a frozen cohort")
+    if not isinstance(config.get("serving_exclusive", False), bool):
+        raise ValueError("serving_exclusive must be a boolean")
+    if (
+        config.get("serving_exclusive")
+        and config.get("model_api") != "chat_completions"
+    ):
+        raise ValueError("Serving load checks require the load-balancer chat interface")
+    if frozen_cohort is not None:
+        config["frozen_cohort"] = frozen_cohort
     if not isinstance(config.get("rounds"), int) or config["rounds"] < 1:
         raise ValueError(
             "Meta-Harness requires at least one proposal round; staged configs are execution checks"
@@ -163,19 +188,124 @@ def create(root, config_path, tasks_path, admission_dir):
             "upstream_hashes": inventory(UPSTREAM),
             "admission_hashes": inventory(root / "admission"),
             "status": "created",
-            "method": "official-meta-harness-terminal-bench-loop-nika-adapter",
+            "method": (
+                "frozen-cohort-validation"
+                if frozen_cohort is not None
+                else "official-meta-harness-terminal-bench-loop-nika-adapter"
+            ),
         },
     )
     workspace = root / "search_workspace"
     (workspace / "agents").mkdir(parents=True)
-    shutil.copyfile(
-        ROOT / "meta_candidates/baseline.py", workspace / "agents/baseline.py"
+    (workspace / "agents/baseline.py").write_text(
+        (ROOT / "meta_candidates/baseline.py").read_text()
+        if baseline_source is None
+        else baseline_source
     )
     shutil.copyfile(ROOT / "domain_spec.md", workspace / "domain_spec.md")
-    shutil.copyfile(
-        ROOT / "meta_runtime/meta_agent/runtime.py", workspace / "runtime-interface.py"
+    runtime = (ROOT / "meta_runtime/meta_agent/runtime.py").read_text()
+    context = next(
+        n
+        for n in ast.parse(runtime).body
+        if isinstance(n, ast.ClassDef) and n.name == "HarnessContext"
+    )
+    (workspace / "runtime-interface.py").write_text(
+        '"""Reference only. Implement AgentHarness in a standalone module. Do not import this file."""\n\n'
+        + ast.get_source_segment(runtime, context)
+        + "\n"
     )
     stage(root, "baseline", (workspace / "agents/baseline.py").read_text())
+
+
+def fork_validation(source, root, config_path):
+    """Evaluate the entire searched cohort under a new execution identity."""
+    source = source.resolve()
+    if root.resolve().is_relative_to(source):
+        raise ValueError(
+            "Validation must use a directory outside the source experiment"
+        )
+    with (source / "controller.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        parent = read(source / "experiment.json")
+        if (source / "frozen.json").exists() or list(source.glob("candidates/*/final")):
+            raise ValueError(
+                "Validation must precede candidate selection and final evaluation"
+            )
+        if parent["contract_hash"] != identity([parent["config"], parent["tasks"]]):
+            raise ValueError("Source experiment contract changed")
+        for key, path in [
+            ("runtime_hashes", ROOT / "meta_runtime"),
+            ("upstream_hashes", UPSTREAM),
+            ("admission_hashes", source / "admission"),
+        ]:
+            if parent[key] != inventory(path):
+                raise ValueError("Validation source differs: " + key)
+        rows = [
+            json.loads(line)
+            for line in (
+                source
+                / "search_workspace/logs"
+                / source.name
+                / "evolution_summary.jsonl"
+            )
+            .read_text()
+            .splitlines()
+        ]
+        rounds = parent["config"]["rounds"]
+        if read(source / "search-complete.json")["rounds"] != rounds or [
+            row["iteration"] for row in rows
+        ] != list(range(1, rounds + 1)):
+            raise ValueError("Source search is incomplete")
+        names = list(dict.fromkeys(["baseline"] + [row["agent"] for row in rows]))
+        config = read(config_path)
+        permitted = {
+            "serving_job_ids",
+            "state_dir",
+            "total_timeout_sec",
+            "serving_exclusive",
+        }
+        changed = {
+            key
+            for key in config.keys() | parent["config"].keys()
+            if config.get(key) != parent["config"].get(key)
+        }
+        if changed - permitted:
+            raise ValueError(
+                "Validation changed fixed settings: " + str(sorted(changed - permitted))
+            )
+        candidates = []
+        for name in names:
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                raise ValueError("Invalid source candidate name")
+            candidate = source / "candidates" / name
+            meta = verify_candidate(candidate)
+            summary = read(candidate / "search/summary.json")
+            if not summary["complete"]:
+                raise ValueError("Source candidate search is unresolved: " + name)
+            candidates.append({"name": name, "sha256": meta["sha256"]})
+        cohort = {
+            "source_experiment": str(source),
+            "source_contract_hash": parent["contract_hash"],
+            "candidates": candidates,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            tasks_path = Path(temporary) / "tasks.json"
+            write(tasks_path, parent["tasks"])
+            create(
+                root,
+                config_path,
+                tasks_path,
+                source / "admission",
+                frozen_cohort=cohort,
+                baseline_source=(
+                    source / "candidates/baseline/candidate.py"
+                ).read_text(),
+            )
+        for name in names:
+            original = source / "candidates" / name
+            staged = stage(root, name, (original / "candidate.py").read_text())
+            if inventory(staged / "project") != inventory(original / "project"):
+                raise ValueError("Validation changed the candidate runtime: " + name)
 
 
 def sync_history(root):
@@ -186,7 +316,7 @@ def sync_history(root):
         for path in candidate.rglob("*"):
             rel = path.relative_to(candidate)
             if path.is_file() and (
-                rel == Path("candidate.py")
+                rel in {Path("candidate.py"), Path("candidate.json")}
                 or (
                     rel.parts[0] == "search"
                     and path.name
@@ -311,7 +441,9 @@ class Adapter:
             f"Write one new agents/iter{iteration}_name.py. It must define class AgentHarness with async run(task_description, ctx).\n"
             "Use ctx.complete(messages, tools=None) for model requests. Use ctx.call_tool(name, arguments) for approved primitive tools.\n"
             "ctx.tools contains OpenAI function schemas. You may transform exposed schemas and implement dispatch in your candidate.\n"
-            "Return a plain-text diagnosis report. Preserve typed tool calls and tool outputs in model context.\n"
+            "Return a nonempty plain-text diagnosis report. Use standalone imports, not relative imports.\n"
+            "Preserve typed tool calls and tool outputs in model context.\n"
+            "Before writing code, read historical candidate code, scores, and a nonempty execution trace.\n"
             "Check Python syntax with check_python. Do not execute benchmarks.\n"
             f"Write {pending} as JSON: "
             + json.dumps(
@@ -447,7 +579,7 @@ class Adapter:
         m.parse_trial_metrics = trial_metrics
         return m
 
-    def run(self, until):
+    def search(self):
         m = self.wire()
         m.LOGS_DIR = self.workspace / "logs" / self.root.name
         m.JOBS_DIR = self.workspace / "jobs" / self.root.name
@@ -474,13 +606,28 @@ class Adapter:
             self.root / "search-complete.json",
             {"at": now(), "rounds": m.count_iterations()},
         )
-        if until == "search":
-            return
         candidates = ["baseline"]
         for line in m.EVOLUTION_SUMMARY.read_text().splitlines():
             name = json.loads(line)["agent"]
             if name not in candidates and (self.root / "candidates" / name).exists():
                 candidates.append(name)
+        return candidates
+
+    def run(self, until):
+        cohort = self.config.get("frozen_cohort")
+        if cohort is None:
+            candidates = self.search()
+            if until == "search":
+                return
+        else:
+            if until == "search":
+                raise ValueError("Frozen cohort validation has no search stage")
+            candidates = []
+            for entry in cohort["candidates"]:
+                staged = self.root / "candidates" / entry["name"]
+                if verify_candidate(staged)["sha256"] != entry["sha256"]:
+                    raise ValueError("Frozen cohort candidate changed")
+                candidates.append(entry["name"])
         selection = []
         for name in candidates:
             summary = evaluate(
@@ -539,6 +686,10 @@ def main():
     init.add_argument("--config", type=Path, required=True)
     init.add_argument("--tasks", type=Path, required=True)
     init.add_argument("--admission", type=Path, required=True)
+    fork = sub.add_parser("fork-validation")
+    fork.add_argument("source", type=Path)
+    fork.add_argument("experiment", type=Path)
+    fork.add_argument("--config", type=Path, required=True)
     for verb in ["run", "resume"]:
         run = sub.add_parser(verb)
         run.add_argument("experiment", type=Path)
@@ -550,6 +701,9 @@ def main():
     root = args.experiment.resolve()
     if args.command == "init":
         create(root, args.config, args.tasks, args.admission)
+        return
+    if args.command == "fork-validation":
+        fork_validation(args.source, root, args.config)
         return
 
     def interrupt(signum, frame):

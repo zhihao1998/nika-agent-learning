@@ -56,8 +56,15 @@ class Backend:
         return feedback
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "invalid python!",
+        "from . import HarnessContext\nclass AgentHarness:\n async def run(self, task, ctx): return 'report'\n",
+    ],
+)
 def test_two_rounds_candidate_failure_freeze_final_and_idempotent_resume(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, invalid
 ):
     root, tasks = initialize(tmp_path)
     monkeypatch.setattr(meta_adapter, "NikaBackend", Backend)
@@ -68,7 +75,7 @@ def test_two_rounds_candidate_failure_freeze_final_and_idempotent_resume(
         generated.append(iteration)
         name = f"iter{iteration}_candidate"
         source = (
-            "invalid python!"
+            invalid
             if iteration == 1
             else (meta_adapter.ROOT / "meta_candidates/baseline.py").read_text()
         )
@@ -128,6 +135,77 @@ def test_fault_family_leak_and_path_traversal_are_rejected():
     tasks["search"][0]["id"] = "../escape"
     with pytest.raises(ValueError, match="path component"):
         validate_splits(tasks)
+
+
+def test_frozen_validation_preserves_parent_and_reevaluates_entire_cohort(
+    tmp_path, monkeypatch
+):
+    root, tasks = initialize(tmp_path)
+    monkeypatch.setattr(meta_adapter, "NikaBackend", Backend)
+    adapter = meta_adapter.Adapter(root, tmp_path)
+
+    def propose(prompt, iteration, timeout=1200):
+        name = f"iter{iteration}_candidate"
+        (adapter.workspace / "agents" / f"{name}.py").write_text(
+            (meta_adapter.ROOT / "meta_candidates/baseline.py").read_text()
+            + f"\n# Round {iteration}.\n"
+        )
+        write(
+            adapter.official.PENDING_EVAL,
+            {
+                "candidates": [
+                    {"name": name, "import_path": f"agents.{name}:AgentHarness"}
+                ]
+            },
+        )
+        return True
+
+    monkeypatch.setattr(adapter, "propose", propose)
+    adapter.run("search")
+    (root / "controller.lock").touch()
+    before = inventory(root)
+    cfg = read(root / "experiment.json")["config"]
+    cfg.update(
+        state_dir=str(tmp_path / "new-native-state"),
+        total_timeout_sec=900,
+    )
+    path = tmp_path / "validation-config.json"
+    write(path, cfg)
+    child = tmp_path / "validation"
+    meta_adapter.fork_validation(root, child, path)
+    assert inventory(root) == before
+    assert not list(child.glob("candidates/*/search"))
+    imported = read(child / "experiment.json")["config"]["frozen_cohort"]
+    assert [c["name"] for c in imported["candidates"]] == [
+        "baseline",
+        "iter1_candidate",
+        "iter2_candidate",
+    ]
+    for entry in imported["candidates"]:
+        name = entry["name"]
+        assert inventory(child / "candidates" / name / "project") == inventory(
+            root / "candidates" / name / "project"
+        )
+    validation = meta_adapter.Adapter(child, tmp_path)
+    monkeypatch.setattr(
+        validation,
+        "search",
+        lambda: pytest.fail("Validation must not run the optimizer"),
+    )
+    validation.run("final")
+    assert read(child / "frozen.json")["candidate"] == "baseline"
+    assert set(validation.backend.executed) == {
+        "baseline",
+        "iter1_candidate",
+        "iter2_candidate",
+    }
+    assert not (child / "search-complete.json").exists()
+    assert inventory(root) == before
+    cfg["max_steps"] += 1
+    write(path, cfg)
+    with pytest.raises(ValueError, match="fixed settings"):
+        meta_adapter.fork_validation(root, tmp_path / "invalid-validation", path)
+    assert not (tmp_path / "invalid-validation").exists()
 
 
 def test_composed_primitive_calls_keep_observations_and_charge_each_call():

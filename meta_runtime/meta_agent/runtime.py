@@ -52,15 +52,25 @@ class HarnessContext:
 
 class MetaAgent(LearningAgent):
     async def diagnose(self, task_description):
-        from harness import AgentHarness
+        try:
+            from harness import AgentHarness
+        except Exception as exc:
+            raise RuntimeError(
+                f"Candidate contract error: import failed: {exc}"
+            ) from exc
 
         log = MessageLogger(phase=DIAGNOSIS, session_dir=self.trace_dir)
         client = MultiServerMCPClient(self.diagnosis_mcp_config())
         executor = ToolExecutor(await client.get_tools(), log, limit=60)
         async with asyncio.timeout(600):
-            return await AgentHarness().run(
+            report = await AgentHarness().run(
                 task_description, HarnessContext(self, executor, log)
             )
+            if not isinstance(report, str) or not report.strip():
+                raise TypeError(
+                    "Candidate contract error: return a nonempty plain-text diagnosis report"
+                )
+            return report
 
     async def submit(self, diagnosis_report, context):
         # Candidate code is not imported in this phase.

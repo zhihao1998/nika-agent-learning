@@ -1,6 +1,5 @@
 """Metered provider transport and filesystem tools for the official proposer."""
 
-import ast
 import json
 import signal
 import sys
@@ -46,7 +45,22 @@ def workspace_path(workspace, relative):
     return path
 
 
-def operate(workspace, iteration, name, args):
+def evidence_kind(relative):
+    """Identify search evidence, excluding proposer prose and hidden splits."""
+    parts = Path(relative).parts
+    if len(parts) < 3 or parts[0] != "history":
+        return None
+    if parts[2:] == ("candidate.py",):
+        return "code"
+    if len(parts) > 3 and parts[2] == "search":
+        if parts[-1] in {"feedback.json", "summary.json"}:
+            return "score"
+        if parts[-1] in {"messages.jsonl", "model_calls.jsonl", "tool_calls.jsonl"}:
+            return "trace"
+    return None
+
+
+def operate(workspace, iteration, name, args, *, evidence=None):
     if name == "list_files":
         return "\n".join(
             str(p.relative_to(workspace))
@@ -57,12 +71,23 @@ def operate(workspace, iteration, name, args):
         p = workspace_path(workspace, args["path"])
         offset = max(0, int(args.get("offset", 0)))
         body = p.read_text()
+        page = body[offset : offset + 24000]
+        if evidence is not None and page.strip():
+            kind = evidence_kind(p.relative_to(workspace.resolve()))
+            if kind:
+                evidence.setdefault(kind, []).append(
+                    {
+                        "path": str(p.relative_to(workspace.resolve())),
+                        "offset": offset,
+                        "chars": len(page),
+                    }
+                )
         return json.dumps(
             {
                 "path": args["path"],
                 "offset": offset,
                 "total_chars": len(body),
-                "content": body[offset : offset + 24000],
+                "content": page,
             }
         )
     if name == "write_file":
@@ -85,21 +110,21 @@ def operate(workspace, iteration, name, args):
             raise ValueError(
                 "A submitted candidate is immutable; choose another new filename"
             )
+        if evidence is not None:
+            missing = {"code", "score", "trace"} - evidence.keys()
+            if missing:
+                raise ValueError(
+                    "Read historical search evidence before writing a candidate: "
+                    + ", ".join(sorted(missing))
+                )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(args["content"])
         return "Written " + str(relative)
     if name == "check_python":
         p = workspace_path(workspace, args["path"])
-        tree = ast.parse(p.read_text())
-        cls = next(
-            n
-            for n in tree.body
-            if isinstance(n, ast.ClassDef) and n.name == "AgentHarness"
-        )
-        assert any(
-            isinstance(n, ast.AsyncFunctionDef) and n.name == "run" for n in cls.body
-        ), "AgentHarness needs async run(task_description, ctx)"
-        compile(tree, str(p), "exec")
+        from .meta_adapter import check_source
+
+        check_source(p.read_text())
         return "Syntax and interface checks passed. Runtime validation occurs in the NIKA sandbox."
     raise ValueError("Unknown proposer tool")
 
@@ -159,6 +184,7 @@ def generate(root, workspace, iteration, prompt, log_dir):
     upstream, credential, headers = upstream_for_config(cfg)
     token = new_proxy_token()
     exchanges = []
+    evidence = {}
     log_dir.mkdir(parents=True, exist_ok=True)
     from .backend import serving_identity
 
@@ -214,7 +240,11 @@ def generate(root, workspace, iteration, prompt, log_dir):
                     try:
                         args = json.loads(call["function"]["arguments"])
                         result = operate(
-                            workspace, iteration, call["function"]["name"], args
+                            workspace,
+                            iteration,
+                            call["function"]["name"],
+                            args,
+                            evidence=evidence,
                         )
                     except Exception as exc:
                         result = json.dumps({"error": str(exc)})
@@ -223,6 +253,7 @@ def generate(root, workspace, iteration, prompt, log_dir):
                     )
             raise RuntimeError("Proposer request budget exhausted")
     finally:
+        write(log_dir / "evidence-reads.json", evidence)
         write(log_dir / "messages.json", messages)
 
 

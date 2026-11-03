@@ -8,6 +8,8 @@ The adapter submits a native `RolloutRequest` through `nika rollout run`. The re
 
 `RolloutResult` separates the native outcome from a nullable terminal reward and references native artifacts. An agent failure receives zero; unresolved infrastructure errors receive null. The caller retains the task, candidate, attempt, session, configuration, model exchanges, primitive calls, submission, metrics, and cleanup records.
 
+The learning adapter prioritizes native `infra_error` validity flags when scheduling retries and retains the original status as `native_outcome`. A [new validation run](../RUNBOOK.md#revalidate-a-completed-search) can reuse the entire searched cohort after a serving interruption. It retains candidate code and runtime identities, reevaluates selection, and keeps previous scores in the source experiment.
+
 Native and Firecracker execution use the same request schema. NIKA prepares and restores snapshots, validates restored environments, and removes disposable VM copies. The learning controller does not create another emulator, scorer, or snapshot manager.
 
 This whole-episode boundary follows the separation of agent and task execution in Terminal-Bench/Harbor and external predictions and evaluation in SWE-bench. NIKA continues to execute its own network tasks. See the native rollout reference for its Python and CLI contracts.
@@ -16,11 +18,13 @@ This whole-episode boundary follows the separation of agent and task execution i
 
 The two vendored Meta-Harness files remain byte-identical to upstream commit `8123ccabe2b19fa1123090b2e5f1bacc20963ce8`. The adapter calls upstream `run_evolve`, frontier updates, iteration accounting, and evolution summaries. It replaces Harbor execution, validation, smoke evaluation, result parsing, and proposer transport with NIKA hooks.
 
-The proposer uses bounded filesystem tools over a search-only workspace. It can page through prior candidate code and actual search interactions. It writes a new candidate and pending evaluation manifest. It cannot execute shell commands or read selection/final data through these tools. Candidate code executes only inside the NIKA sandbox.
+The proposer uses bounded filesystem tools over a search-only workspace. It can page through prior candidate code and actual search interactions. Before writing a candidate or pending evaluation manifest, it must read historical code, search scores, and an execution trace. The controller records nonempty page reads per attempt. This is an evidence-access check, not a test of causal reasoning. It cannot execute shell commands or read selection/final data through these tools. Candidate code executes only inside the NIKA sandbox.
 
 The proposer uses the configured Chat Completions service or the existing NIKA subscription Responses transport. Its context and accounting are separate from the evaluated agent. This is a network-domain adaptation of the upstream method. Different proposer tooling, continuous joint RCA F1, smaller task sets, and fixed serial execution distinguish it from the paper's numerical experiments.
 
 ## Evolve executable diagnosis code
+
+Each candidate is a standalone module that returns a nonempty string. Static checks reject relative imports without executing candidate code on the controller. Runtime checks classify candidate import and report contract errors as agent failures while preserving native records. Explicit infrastructure flags take precedence.
 
 Each candidate defines:
 

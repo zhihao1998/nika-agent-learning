@@ -11,6 +11,7 @@ from nika_learning.store import read, write, inventory, identity
 from nika_learning.meta_adapter import ROOT, UPSTREAM
 from nika_learning.store import digest
 from nika_learning.experiment import verify_candidate
+from nika_learning.backend import trial_outcome
 
 sys.path.insert(0, str(ROOT / "meta_runtime"))
 from meta_agent.responses import parse_sse
@@ -113,6 +114,10 @@ for path in root.glob("candidates/*/*/*/attempt-*/feedback.json"):
     native = read(runs[0])
     metrics_path = runs[0].with_name("eval_metrics.json")
     metrics = read(metrics_path) if metrics_path.exists() else {}
+    if feedback["outcome"] != trial_outcome(native, metrics) or feedback.get(
+        "native_outcome"
+    ) != native.get("outcome"):
+        errors.append("Native outcome classification mismatch: " + str(path))
     expected = (
         metrics.get("rca_f1")
         if feedback["outcome"] == "success"

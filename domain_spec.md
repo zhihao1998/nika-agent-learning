@@ -1,6 +1,6 @@
 # Meta-Harness for NIKA
 
-This experiment adapts the official Meta-Harness Terminal-Bench 2 search loop to network diagnosis. The base model stays fixed. The proposer evolves executable diagnosis programs from prior code, scores and full search traces.
+This experiment adapts the official Meta-Harness Terminal-Bench 2 search loop to network diagnosis. The base model stays fixed. The proposer evolves executable diagnosis programs from prior code, scores and full search traces. Before writing a candidate or proposal manifest, it must read nonempty pages of historical code, search scores, and execution traces. The controller archives those reads. This check establishes access to evidence, not whether the proposed change follows from it.
 
 ## Sources and adaptation boundary
 
@@ -12,9 +12,9 @@ The native metric is continuous joint RCA F1. The adapter averages those scores 
 
 A task identifies a real network topology, traffic pattern and optional injected fault. The agent observes the task description and approved MCP tools. It returns a diagnosis report. The fixed submission worker receives the report and NIKA's submission context, then invokes the normal submit tool. NIKA evaluates anomaly detection and exact resource/fault root causes. A healthy control requires an anomaly decision of false.
 
-Each candidate is a new Python file in `agents/` defining `class AgentHarness` with `async run(task_description, ctx)`. The context provides:
+Each candidate is a standalone Python file in `agents/` defining `class AgentHarness` with `async run(task_description, ctx)`. Return a nonempty string. Relative imports are unsupported. `runtime-interface.py` documents the context; do not import it. The context provides:
 
-- `ctx.tools`: approved OpenAI function schemas.
+- `ctx.tools`: approved OpenAI function schemas. A tool name is `schema["function"]["name"]`.
 - `await ctx.complete(messages, tools=None)`: a typed assistant message from the fixed model.
 - `await ctx.call_tool(name, arguments)`: a real primitive MCP observation with an observation identity.
 - `ctx.max_steps` and `ctx.model`: fixed model request settings.
