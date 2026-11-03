@@ -5,6 +5,7 @@
   "provider": "custom",
   "model_api": "chat_completions",
   "serving_job_ids": [],
+  "serving_exclusive": true,
   "execution_mode": "native",
   "execution_options": {},
   "state_dir": "/absolute/experiment/state/nika",

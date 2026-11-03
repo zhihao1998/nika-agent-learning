@@ -16,11 +16,20 @@ rows = (
     if summary_path.exists()
     else []
 )
-names = list(dict.fromkeys(["baseline"] + [r["agent"] for r in rows]))
+cohort = meta["config"].get("frozen_cohort")
+names = (
+    [c["name"] for c in cohort["candidates"]]
+    if cohort
+    else list(dict.fromkeys(["baseline"] + [r["agent"] for r in rows]))
+)
 records, curve = [], []
 best = None
 for name in names:
-    iteration = next((r["iteration"] for r in rows if r["agent"] == name), 0)
+    iteration = (
+        names.index(name)
+        if cohort
+        else next((r["iteration"] for r in rows if r["agent"] == name), 0)
+    )
     candidate = root / "candidates" / name
     record = {"iteration": iteration, "candidate": name, "splits": {}}
     for split in ["search", "selection", "final"]:
@@ -116,6 +125,7 @@ report = {
     "executed_primitive_calls": tools,
     "primitive_elapsed_sec": durations,
     "monetary_cost": None,
+    "frozen_cohort": cohort,
 }
 if (root / "frozen.json").exists():
     report["frozen"] = json.loads((root / "frozen.json").read_text())
@@ -126,7 +136,16 @@ lines = [
     "",
     f"Status: {status}. Model: `{meta['config']['model']}`. Backend: `{meta['config']['execution_mode']}`.",
     "",
-    "| Iteration | Candidate | Search RCA F1 | Best search RCA F1 | Selection RCA F1 | Final RCA F1 |",
+]
+if cohort:
+    lines += [
+        "",
+        f"Frozen cohort from `{cohort['source_experiment']}`. This run performs selection and final evaluation. It does not repeat search or reuse earlier scores.",
+        "",
+    ]
+order_label = "Candidate order" if cohort else "Iteration"
+lines += [
+    f"| {order_label} | Candidate | Search RCA F1 | Best search RCA F1 | Selection RCA F1 | Final RCA F1 |",
     "| ---: | --- | ---: | ---: | ---: | ---: |",
 ]
 
@@ -163,7 +182,7 @@ for r in records:
             f"| {r['candidate']} | {split} | {c['attempts']} | {c['model_requests']} | {c['input_tokens']} | {c['output_tokens']} | {c['executed_primitive_calls']} | {c['model_elapsed_sec']:.1f} | {c['attempt_elapsed_sec']:.1f} |"
         )
 (a.output / "results.md").write_text("\n".join(lines) + "\n")
-if curve:
+if any(r["candidate_search_rca_f1"] is not None for r in curve):
     import matplotlib
 
     matplotlib.use("Agg")

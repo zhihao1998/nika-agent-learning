@@ -40,6 +40,7 @@ PY
 | `nika_commit` | Exact clean native checkout to execute |
 | `model`, `model_api`, `provider`, `base_url` | Fixed serving model and transport |
 | `serving_job_ids` | Required allowlist of ready backends for the mcmgt01 service |
+| `serving_exclusive` | Require idle serving before a task and monitor load during execution |
 | `state_dir` | Absolute experiment-owned native state directory |
 | `execution_mode`, `execution_options` | Standard NIKA native or Firecracker settings |
 | `rounds` | Positive bounded proposal count |
@@ -113,7 +114,7 @@ uv run nika-learning resume runs/study --checkout "$NIKA_CHECKOUT" --until selec
 uv run nika-learning resume runs/study --checkout "$NIKA_CHECKOUT" --until final
 ```
 
-Search runs baseline and the configured proposal rounds. Each proposal reads previous search evidence and writes executable candidate code. The first search task also acts as its sandbox check; the full batch reuses that task's completed result.
+Search runs baseline and the configured proposal rounds. The proposer must read historical candidate code, search scores, and a nonempty interaction trace before writing a candidate or proposal manifest. Each proposer attempt archives paths and page offsets in `evidence-reads.json`. These records establish evidence access, not the quality of the analysis. The first search task also acts as its sandbox check; the full batch reuses that task's completed result.
 
 Selection evaluates staged candidates on selection tasks. Mean native joint RCA F1 determines the winner; ties retain the earlier candidate, beginning with baseline. `frozen.json` records selection before final evaluation. Final runs baseline and winner on the final split; if baseline wins, it executes once. Stop after search if you only need to verify the automatic loop.
 
@@ -125,9 +126,26 @@ Send SIGINT or SIGTERM to the foreground controller. Wait for native cleanup to 
 uv run nika-learning resume runs/study --checkout "$NIKA_CHECKOUT" --until final
 ```
 
-The controller lock prevents simultaneous controllers. Completed attempts stay cached. Interrupted attempts retain their records, and recovery starts a new attempt. Invalid candidate code counts as a failed candidate and permits the next round. A failed proposer stops explicitly; resume retries that round within `max_attempts`. Unresolved infrastructure failures prevent selection.
+The controller lock prevents simultaneous controllers. Completed attempts stay cached. Interrupted attempts retain their records, and recovery starts a new attempt. Syntax errors and relative imports reject a candidate before execution and permit the next round. Sandbox candidate import errors and invalid report types count as agent failures with zero reward. Native outcomes remain archived; explicit `infra_error` flags retain infrastructure precedence. Other sandbox, model, and network failures retain their native classification. A failed proposer stops explicitly; resume retries that round within `max_attempts`. Unresolved infrastructure failures prevent selection.
 
-Paused time consumes the experiment's wall budget. Resume does not extend an expired deadline or replace frozen serving jobs. A killed host, surviving orphan workers, mid-trajectory continuation, and automatic serving lease renewal require additional recovery work. Inspect and close recorded owned sessions before restarting after an ungraceful crash.
+Source changes require a new experiment identity. Keep the original checkout to inspect or resume an earlier frozen run. Paused time consumes the experiment's wall budget. Resume does not extend an expired deadline or replace frozen serving jobs. A killed host, surviving orphan workers, mid-trajectory continuation, and automatic serving lease renewal require additional recovery work. Inspect and close recorded owned sessions before restarting after an ungraceful crash.
+
+## Revalidate a completed search
+
+If serving contention invalidates selection, preserve the original experiment and register a new validation run. Use this path before a candidate has been frozen or final evaluation has started. The new run imports every searched candidate in its original order, including baseline. It copies candidate code and runtime, not earlier scores or interactions. It does not call the optimizer.
+
+Create a config from the source experiment's `config` object. You may change only `serving_job_ids`, `state_dir`, `total_timeout_sec`, and `serving_exclusive`. Set live job IDs, a new private state directory, and a bounded wall budget. Keep the same model, tasks, permissions, inference settings, and per-task budgets.
+
+```sh
+uv run nika-learning fork-validation runs/study runs/validation --config state/validation-config.json
+uv run nika-learning run runs/validation --checkout "$NIKA_CHECKOUT" --until final
+```
+
+The validation run starts new selection attempts for the entire cohort, freezes the winner, and evaluates baseline and winner on final tasks. Its wall deadline and attempt limits belong to the new identity. The source experiment remains unchanged. Reports include the source experiment and candidate identities.
+
+For the load-balancer chat interface, `serving_exclusive: true` rejects active or queued workloads before creating an attempt. Use this check for harnesses with at most one in-flight model request. During a task, the controller samples load every five seconds and permits one active request from its own rollout. Observed competing requests or lost telemetry interrupt the task through normal cleanup and preserve `serving-failure.json`. Resume after the service is available; interruptions consume the registered attempt limit. This is sampled contention detection, not an atomic serving reservation. Coordinate other clients before testing. Subscription transports do not expose these load metrics.
+
+Native `infra_error` flags produce retryable infrastructure outcomes with no quality score. Feedback also retains `native_outcome`, and the original native run and metrics remain unchanged. Genuine agent failures still count as zero.
 
 ## Inspect records and cleanup
 

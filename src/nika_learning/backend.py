@@ -1,6 +1,7 @@
 """Use NIKA's public CLI and original trial artifacts."""
 
 import os
+import json
 import signal
 import subprocess
 import time
@@ -29,7 +30,7 @@ def wait_process_group(group_id: int, timeout: float = 65):
         time.sleep(0.2)
 
 
-def serving_identity(config):
+def serving_identity(config, *, active_limit=0):
     if config.get("model_api") == "responses":
         serving = {
             "provider": "codex_subscription",
@@ -59,7 +60,28 @@ def serving_identity(config):
             raise RuntimeError(
                 "Load balancer has an unexpected backend or no ready backend for the fixed model"
             )
+        if config.get("serving_exclusive"):
+            if any(
+                not {"active_requests", "waiting"} <= b.keys() for b in model_backends
+            ):
+                raise RuntimeError("Serving load telemetry is missing")
+            active = sum(b["active_requests"] for b in model_backends)
+            waiting = sum(b["waiting"] for b in model_backends)
+            if active > active_limit or waiting > 0:
+                raise RuntimeError(
+                    f"Shared serving is busy: active={active}, waiting={waiting}. "
+                    "Resume after other workloads finish."
+                )
     return serving
+
+
+def trial_outcome(native, metrics):
+    if "infra_error" in metrics.get("validity_flags", []):
+        return "infra_failed"
+    error = native.get("agent_error") or native.get("error") or ""
+    if "Candidate contract error:" in error:
+        return "agent_failed"
+    return native.get("outcome", "infra_failed")
 
 
 class NikaBackend:
@@ -219,13 +241,35 @@ class NikaBackend:
             )
             write(attempt / "process.json", {"pid": proc.pid, "started": now()})
             try:
-                proc.wait(
-                    timeout=max(
-                        1, min(deadline - time.time(), cfg["case_timeout_sec"] + 180)
-                    )
-                )
+                stop_at = min(deadline, time.time() + cfg["case_timeout_sec"] + 180)
+                while True:
+                    remaining = stop_at - time.time()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, cfg["case_timeout_sec"])
+                    try:
+                        proc.wait(timeout=min(5, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        if time.time() >= stop_at:
+                            raise
+                        if cfg.get("serving_exclusive"):
+                            try:
+                                sample = serving_identity(cfg, active_limit=1)
+                            except (RuntimeError, httpx.HTTPError) as exc:
+                                write(
+                                    attempt / "serving-failure.json",
+                                    {"at": now(), "reason": str(exc)},
+                                )
+                                raise
+                            with (attempt / "serving-load.jsonl").open("a") as stream:
+                                stream.write(
+                                    json.dumps({"at": now(), "serving": sample}) + "\n"
+                                )
             except BaseException:
-                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     proc.wait(timeout=65)
                 except subprocess.TimeoutExpired:
@@ -261,7 +305,7 @@ class NikaBackend:
         native = read(runs[0])
         metrics_path = runs[0].with_name("eval_metrics.json")
         metrics = read(metrics_path) if metrics_path.exists() else {}
-        outcome = native.get("outcome", "infra_failed")
+        outcome = trial_outcome(native, metrics)
         score = (
             metrics.get("rca_f1")
             if outcome == "success"
@@ -280,7 +324,7 @@ class NikaBackend:
         calls, usage, duration = 0, {}, 0.0
         for path in (attempt / "nika").rglob("model_calls.jsonl"):
             for line in path.read_text().splitlines():
-                entry = __import__("json").loads(line)
+                entry = json.loads(line)
                 calls += int(entry.get("llm_request", False))
                 duration += (entry.get("duration_ms", 0) or 0) / 1000
                 for key, value in (entry.get("usage") or {}).items():
@@ -288,6 +332,7 @@ class NikaBackend:
                         usage[key] = usage.get(key, 0) + value
         return {
             "outcome": outcome,
+            "native_outcome": native.get("outcome"),
             "score": score,
             "score_status": metrics.get("score_status") or native.get("score_status"),
             "validity_flags": metrics.get("validity_flags", []),
