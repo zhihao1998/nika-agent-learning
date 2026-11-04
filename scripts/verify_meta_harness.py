@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
+from nika_learning.meta_proposer import proposer_config
 from nika_learning.store import read, write, inventory, identity
 from nika_learning.meta_adapter import ROOT, UPSTREAM
 from nika_learning.store import digest
@@ -137,6 +138,7 @@ for path in list(
 ) + list(root.glob("rounds/*/attempt-*/model_calls.jsonl")):
     phase_counts = Counter()
     kind = "optimizer" if "rounds" in path.relative_to(root).parts else "agent"
+    role_cfg = proposer_config(cfg) if kind == "optimizer" else cfg
     for line in path.read_text().splitlines():
         event = json.loads(line)
         if not event.get("llm_request"):
@@ -155,24 +157,23 @@ for path in list(
         phase_counts[event["phase"]] += int(charged)
         if event["status"] == 200:
             body = event["response"]
-            chat = cfg.get("model_api") == "chat_completions"
+            chat = role_cfg.get("model_api") == "chat_completions"
             if isinstance(body, str):
                 body = json.loads(body) if chat else parse_sse(body)
-            if (
-                event["request"].get("model") != cfg["model"]
-                or body.get("model", cfg["model"]) != cfg["model"]
-            ):
+            if event["request"].get("model") != role_cfg["model"] or body.get(
+                "model", role_cfg["model"]
+            ) != role_cfg.get("served_model", role_cfg["model"]):
                 errors.append("Served a different model: " + str(path))
             expected_effort = (
-                cfg.get("optimizer_reasoning_effort", "low")
+                role_cfg.get("optimizer_reasoning_effort", "low")
                 if kind == "optimizer"
-                else cfg.get("model_reasoning_effort", "low")
+                else role_cfg.get("model_reasoning_effort", "low")
             )
             inference_matches = (
-                event["request"].get("temperature") == cfg["temperature"]
-                and event["request"].get("max_tokens") == cfg["max_tokens"]
+                event["request"].get("temperature") == role_cfg["temperature"]
+                and event["request"].get("max_tokens") == role_cfg["max_tokens"]
                 and event["request"].get("chat_template_kwargs", {})
-                == cfg.get("chat_template_kwargs", {})
+                == role_cfg.get("chat_template_kwargs", {})
                 if chat
                 else event["request"].get("reasoning", {}).get("effort")
                 == expected_effort

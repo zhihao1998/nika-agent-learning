@@ -15,12 +15,33 @@ sys.path.insert(0, str(ROOT / "meta_runtime"))
 from meta_agent.transport import request, decode  # noqa: E402
 
 
+def proposer_config(config):
+    """Resolve explicit proposer settings independently of the evaluated model."""
+    proposer = config.get("proposer")
+    if proposer is None:
+        return config
+    required = {"model", "provider", "model_api", "base_url", "serving_job_ids"}
+    if not required <= proposer.keys():
+        raise ValueError(
+            "Proposer configuration must declare its model and serving identity"
+        )
+    result = {**config, **proposer}
+    for key in ("gateway", "chat_template_kwargs", "model_reasoning_effort"):
+        if key not in proposer:
+            result.pop(key, None)
+    return result
+
+
 def upstream_for_config(cfg):
     if cfg.get("model_api", "responses") == "chat_completions":
         if cfg.get("provider") != "custom" or not cfg.get("base_url"):
             raise ValueError("Chat proposer requires a custom provider and base_url")
-        # The existing self-hosted endpoint is unauthenticated. Keep subscription
-        # credentials out of custom endpoints and experiment configuration.
+        if cfg.get("gateway"):
+            from .gateway import inference_headers
+
+            headers = inference_headers(cfg)
+            credential = headers.pop("Authorization").removeprefix("Bearer ")
+            return cfg["base_url"], credential, headers
         return cfg["base_url"], "", {}
     if cfg.get("model_api", "responses") != "responses":
         raise ValueError("Unsupported proposer model API")
@@ -36,6 +57,35 @@ def proposer_request(cfg, messages, tools):
     if endpoint == "/responses":
         body["reasoning"] = {"effort": cfg.get("optimizer_reasoning_effort", "low")}
     return endpoint, body
+
+
+def bounded_messages(messages, max_chars=16000):
+    """Keep instructions and recent complete tool exchanges within a UTF-8 byte budget."""
+    result = list(messages)
+    while len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > max_chars:
+        # Remove one whole assistant turn and all its tool responses.
+        if len(result) < 4 or result[2].get("role") != "assistant":
+            raise ValueError("Proposer instructions exceed the context text budget")
+        end = 3
+        while end < len(result) and result[end].get("role") == "tool":
+            end += 1
+        if end == len(result):
+            raise ValueError("One proposer exchange exceeds the context text budget")
+        del result[2:end]
+    return result
+
+
+def decode_proposal(endpoint, text):
+    if endpoint == "/chat/completions":
+        choice = json.loads(text)["choices"][0]
+        if choice["finish_reason"] == "length":
+            # A truncated tool call must never execute.
+            return {
+                "role": "assistant",
+                "content": choice["message"].get("content") or "",
+            }, True
+    message, _ = decode(endpoint, text)
+    return message, False
 
 
 def workspace_path(workspace, relative):
@@ -60,7 +110,7 @@ def evidence_kind(relative):
     return None
 
 
-def operate(workspace, iteration, name, args, *, evidence=None):
+def operate(workspace, iteration, name, args, *, evidence=None, page_chars=4000):
     if name == "list_files":
         return "\n".join(
             str(p.relative_to(workspace))
@@ -71,7 +121,7 @@ def operate(workspace, iteration, name, args, *, evidence=None):
         p = workspace_path(workspace, args["path"])
         offset = max(0, int(args.get("offset", 0)))
         body = p.read_text()
-        page = body[offset : offset + 24000]
+        page = body[offset : offset + page_chars]
         if evidence is not None and page.strip():
             kind = evidence_kind(p.relative_to(workspace.resolve()))
             if kind:
@@ -136,7 +186,7 @@ def generate(root, workspace, iteration, prompt, log_dir):
         new_proxy_token,
     )
 
-    cfg = read(root / "experiment.json")["config"]
+    cfg = proposer_config(read(root / "experiment.json")["config"])
     messages = [
         {
             "role": "system",
@@ -205,9 +255,15 @@ def generate(root, workspace, iteration, prompt, log_dir):
                     ),
                 )
             )
-            client = stack.enter_context(httpx.Client(timeout=240))
+            client = stack.enter_context(httpx.Client(timeout=1200))
             for _ in range(cfg["optimizer_requests"]):
-                endpoint, body = proposer_request(cfg, messages, tools)
+                context_window = cfg.get("context_window", 32768)
+                # Reserve output and schema space. Limit UTF-8 bytes conservatively.
+                context_chars = min(16000, context_window - cfg["max_tokens"] - 4096)
+                if context_window > 32768:
+                    context_chars = context_window - cfg["max_tokens"] - 4096
+                request_messages = bounded_messages(messages, max_chars=context_chars)
+                endpoint, body = proposer_request(cfg, request_messages, tools)
                 response = client.post(
                     f"http://127.0.0.1:{port}" + endpoint,
                     json=body,
@@ -222,8 +278,16 @@ def generate(root, workspace, iteration, prompt, log_dir):
                 )
                 write(log_dir / "exchanges.json", exchanges)
                 response.raise_for_status()
-                message, _ = decode(endpoint, response.text)
+                message, truncated = decode_proposal(endpoint, response.text)
                 messages.append(message)
+                if truncated:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "The output limit interrupted this response. Continue with filesystem tools. Write the candidate and pending evaluation file.",
+                        }
+                    )
+                    continue
                 calls = message.get("tool_calls", [])
                 if not calls:
                     pending = workspace / "logs" / root.name / "pending_eval.json"
@@ -245,12 +309,16 @@ def generate(root, workspace, iteration, prompt, log_dir):
                             call["function"]["name"],
                             args,
                             evidence=evidence,
+                            page_chars=min(24000, max(4000, context_chars // 4)),
                         )
                     except Exception as exc:
                         result = json.dumps({"error": str(exc)})
                     messages.append(
                         {"role": "tool", "tool_call_id": call["id"], "content": result}
                     )
+                pending = workspace / "logs" / root.name / "pending_eval.json"
+                if pending.exists():
+                    return
             raise RuntimeError("Proposer request budget exhausted")
     finally:
         write(log_dir / "evidence-reads.json", evidence)

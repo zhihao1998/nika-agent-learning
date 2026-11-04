@@ -31,6 +31,10 @@ def wait_process_group(group_id: int, timeout: float = 65):
 
 
 def serving_identity(config, *, active_limit=0):
+    if config.get("gateway"):
+        from .gateway import serving_identity as gateway_identity
+
+        return gateway_identity(config)
     if config.get("model_api") == "responses":
         serving = {
             "provider": "codex_subscription",
@@ -94,6 +98,14 @@ class NikaBackend:
         self.python = self.checkout / ".venv/bin/python"
         self.env = {**os.environ, "NIKA_AGENTS_FILE": str(self.root / "agents.yaml")}
         self.env.pop("NIKA_RUN_CONFIG", None)
+        if config.get("gateway"):
+            from .gateway import inference_headers
+
+            if config["gateway"]["cluster"] != "rocs":
+                raise ValueError("The executor gateway currently supports ROCS only")
+            self.env["NIKA_CUSTOM_API_KEY"] = inference_headers(config)[
+                "Authorization"
+            ].removeprefix("Bearer ")
         if config.get("state_dir"):
             self.env["NIKA_STATE_DIR"] = config["state_dir"]
         if config.get("docker_host"):

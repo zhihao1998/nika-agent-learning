@@ -161,6 +161,9 @@ def create(
             raise ValueError("Expected a positive integer: " + key)
     if config["underlying_tool_calls"] > 60:
         raise ValueError("underlying_tool_calls exceeds the fixed runtime cap of 60")
+    from .meta_proposer import proposer_config
+
+    proposer_config(config)
     validate_splits(tasks)
     records = {}
     for row in sum(tasks.values(), []):
